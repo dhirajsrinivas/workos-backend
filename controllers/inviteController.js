@@ -2,6 +2,16 @@ const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/db');
 const { sendInviteEmail } = require('../config/email');
 
+// Helper: verify requester is admin/owner of workspace
+const requireWorkspaceAdmin = async (workspaceId, userId) => {
+  const result = await pool.query(
+    "SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2",
+    [workspaceId, userId]
+  );
+  if (!result.rows.length) return false;
+  return ['admin', 'owner'].includes(result.rows[0].role);
+};
+
 // POST /api/workspace/:id/invite
 const sendInvite = async (req, res) => {
   try {
@@ -38,10 +48,16 @@ const sendInvite = async (req, res) => {
     const token = uuidv4();
     const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000);
 
-    await pool.query(
-      'INSERT INTO workspace_invites (workspace_id,invited_by,email,role,token,expires_at) VALUES ($1,$2,$3,$4,$5,$6)',
-      [req.params.id, req.user.id, email.toLowerCase(), role, token, expiresAt]
-    );
+    try {
+      await pool.query(
+        'INSERT INTO workspace_invites (workspace_id,invited_by,email,role,token,expires_at) VALUES ($1,$2,$3,$4,$5,$6)',
+        [req.params.id, req.user.id, email.toLowerCase(), role, token, expiresAt]
+      );
+    } catch (err) {
+      if (err.code === '23505')
+        return res.status(409).json({ success: false, message: 'A pending invitation already exists for this email.' });
+      throw err;
+    }
 
     const inviteLink = `${process.env.FRONTEND_URL}/invite/${token}`;
 
@@ -55,7 +71,6 @@ const sendInvite = async (req, res) => {
       });
     } catch (emailErr) {
       console.error('Email send failed:', emailErr.message);
-      // Still return success with invite link so owner can share manually
       return res.status(201).json({
         success: true,
         message: 'Invitation created, but email delivery failed. Share the link manually.',
@@ -74,6 +89,10 @@ const sendInvite = async (req, res) => {
 // GET /api/workspace/:id/invites
 const listInvites = async (req, res) => {
   try {
+    const isAdmin = await requireWorkspaceAdmin(req.params.id, req.user.id);
+    if (!isAdmin)
+      return res.status(403).json({ success: false, message: 'Not authorized.' });
+
     const result = await pool.query(`
       SELECT wi.*, u.name AS invited_by_name
       FROM workspace_invites wi
@@ -81,16 +100,31 @@ const listInvites = async (req, res) => {
       WHERE wi.workspace_id=$1
       ORDER BY wi.created_at DESC
     `, [req.params.id]);
+
     res.json({ success: true, invites: result.rows });
-  } catch { res.status(500).json({ success: false, message: 'Server error.' }); }
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 };
 
 // DELETE /api/workspace/:id/invites/:inviteId
 const revokeInvite = async (req, res) => {
   try {
-    await pool.query('DELETE FROM workspace_invites WHERE id=$1 AND workspace_id=$2', [req.params.inviteId, req.params.id]);
+    const isAdmin = await requireWorkspaceAdmin(req.params.id, req.user.id);
+    if (!isAdmin)
+      return res.status(403).json({ success: false, message: 'Not authorized.' });
+
+    const result = await pool.query(
+      'DELETE FROM workspace_invites WHERE id=$1 AND workspace_id=$2 RETURNING id',
+      [req.params.inviteId, req.params.id]
+    );
+    if (!result.rows.length)
+      return res.status(404).json({ success: false, message: 'Invite not found.' });
+
     res.json({ success: true, message: 'Invitation revoked.' });
-  } catch { res.status(500).json({ success: false, message: 'Server error.' }); }
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 };
 
 // GET /api/invite/:token  — public, get invite info
@@ -114,45 +148,59 @@ const getInviteInfo = async (req, res) => {
       return res.status(410).json({ success: false, message: 'This invitation has expired.' });
 
     res.json({ success: true, invite });
-  } catch { res.status(500).json({ success: false, message: 'Server error.' }); }
+  } catch {
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
 };
 
 // POST /api/invite/:token/accept  — requires auth
 const acceptInvite = async (req, res) => {
   const client = await pool.connect();
   try {
+    await client.query('BEGIN');
+
     const result = await client.query(`
       SELECT wi.*, w.name AS workspace_name
       FROM workspace_invites wi JOIN workspaces w ON wi.workspace_id=w.id
       WHERE wi.token=$1 FOR UPDATE
     `, [req.params.token]);
 
-    if (!result.rows.length)
+    if (!result.rows.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ success: false, message: 'Invitation not found.' });
+    }
 
     const invite = result.rows[0];
-    if (invite.status !== 'pending')
-      return res.status(410).json({ success: false, message: 'This invitation has already been used.' });
-    if (new Date(invite.expires_at) < new Date())
-      return res.status(410).json({ success: false, message: 'This invitation has expired.' });
-    if (invite.email !== req.user.email)
-      return res.status(403).json({ success: false, message: 'This invitation was sent to a different email address.' });
 
-    await client.query('BEGIN');
-    // Add to workspace
+    if (invite.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return res.status(410).json({ success: false, message: 'This invitation has already been used.' });
+    }
+    if (new Date(invite.expires_at) < new Date()) {
+      await client.query('ROLLBACK');
+      return res.status(410).json({ success: false, message: 'This invitation has expired.' });
+    }
+    if (invite.email !== req.user.email) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ success: false, message: 'This invitation was sent to a different email address.' });
+    }
+
     await client.query(
       'INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
       [invite.workspace_id, req.user.id, invite.role]
     );
-    // Mark as accepted
     await client.query("UPDATE workspace_invites SET status='accepted' WHERE id=$1", [invite.id]);
+
     await client.query('COMMIT');
 
     res.json({ success: true, message: `You have joined ${invite.workspace_name}!`, workspaceId: invite.workspace_id });
   } catch (err) {
     await client.query('ROLLBACK');
+    console.error(err);
     res.status(500).json({ success: false, message: 'Server error.' });
-  } finally { client.release(); }
+  } finally {
+    client.release();
+  }
 };
 
 module.exports = { sendInvite, listInvites, revokeInvite, getInviteInfo, acceptInvite };
