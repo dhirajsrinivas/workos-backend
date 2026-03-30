@@ -33,24 +33,25 @@ const sendInviteEmail = async ({ toEmail, inviterName, workspaceName, role, invi
 </body>
 </html>`;
 
-  const response = await fetch('https://api.resend.com/emails', {
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+      'Accept': 'application/json',
       'Content-Type': 'application/json',
+      'api-key': process.env.BREVO_API_KEY,
     },
     body: JSON.stringify({
-      from: 'WorkOS <onboarding@resend.dev>',
-      to: toEmail,
+      sender: { name: 'WorkOS', email: process.env.SMTP_USER },
+      to: [{ email: toEmail }],
       subject: `${inviterName} invited you to ${workspaceName} on WorkOS`,
-      html: html,
-      text: `${inviterName} invited you to join ${workspaceName} as ${roleLabel}.\n\nAccept here: ${inviteLink}\n\nThis link expires in 48 hours.`,
+      htmlContent: html,
+      textContent: `${inviterName} invited you to join ${workspaceName} as ${roleLabel}.\n\nAccept here: ${inviteLink}\n\nThis link expires in 48 hours.`,
     }),
   });
 
   if (!response.ok) {
     const err = await response.json();
-    throw new Error(`Resend API error: ${JSON.stringify(err)}`);
+    throw new Error(`Brevo API error: ${err.message || JSON.stringify(err)}`);
   }
 };
 
