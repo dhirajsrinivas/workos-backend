@@ -1,10 +1,26 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-});
+if (!process.env.DATABASE_URL) {
+  console.error('\n❌  DATABASE_URL is not set in your .env file.\n');
+  process.exit(1);
+}
+
+let poolConfig;
+try {
+  const url = new URL(process.env.DATABASE_URL);
+  poolConfig = {
+    host: url.hostname, port: parseInt(url.port) || 5432,
+    database: url.pathname.replace('/', ''),
+    user: url.username, password: url.password,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  };
+} catch (e) {
+  console.error('\n❌  DATABASE_URL is malformed.\n');
+  process.exit(1);
+}
+
+const pool = new Pool(poolConfig);
 
 const initDB = async () => {
   const client = await pool.connect();
@@ -76,6 +92,29 @@ const initDB = async () => {
         file_path VARCHAR(500) NOT NULL,
         file_size INTEGER NOT NULL,
         mime_type VARCHAR(100) DEFAULT 'text/plain',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS repo_items (
+        id SERIAL PRIMARY KEY,
+        workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+        parent_id INTEGER REFERENCES repo_items(id) ON DELETE CASCADE,
+        type VARCHAR(10) NOT NULL CHECK (type IN ('file','folder')),
+        name VARCHAR(255) NOT NULL,
+        content TEXT DEFAULT '',
+        language VARCHAR(50) DEFAULT 'plaintext',
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS repo_commits (
+        id SERIAL PRIMARY KEY,
+        workspace_id INTEGER REFERENCES workspaces(id) ON DELETE CASCADE,
+        author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        author_name VARCHAR(100),
+        message VARCHAR(500) NOT NULL,
+        snapshot JSONB NOT NULL,
         created_at TIMESTAMP DEFAULT NOW()
       );
     `);
