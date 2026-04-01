@@ -20,6 +20,7 @@ app.use('/api/auth',      require('./routes/auth'));
 app.use('/api/workspace', require('./routes/workspace'));
 app.use('/api/invite',    require('./routes/invite'));
 app.use('/api/workspace/:id/repo', require('./routes/repo'));
+app.use('/api',           require('./routes/aria'));   // ← added
 
 app.get('/api/health', (req, res) => res.json({ success: true, message: 'WorkOS API running', timestamp: new Date() }));
 
