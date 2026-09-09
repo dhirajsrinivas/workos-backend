@@ -17,7 +17,7 @@ router.post('/aria/chat', async (req, res) => {
     }
 
     const response = await client.chat.completions.create({
-      model: 'openai/gpt-oss-120b',,
+      model: 'openai/gpt-oss-120b',
       max_tokens: 1024,
       messages: [
         { role: 'system', content: system || '' },
